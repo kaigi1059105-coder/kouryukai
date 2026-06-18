@@ -35,6 +35,12 @@ function doPost(e) {
     return ContentService.createTextOutput(data.challenge);
   }
 
+  // Slackの再送イベントは無視（重複登録を防ぐ）
+  // 3秒以内に応答できないとSlackが同じイベントを再送するため、event_idで排除する
+  if (data.event_id && isDuplicateEvent(data.event_id)) {
+    return ContentService.createTextOutput('OK');
+  }
+
   // メッセージイベント
   if (data.event && data.event.type === 'message' && !data.event.bot_id) {
     const config = getConfig();
@@ -56,6 +62,17 @@ function doPost(e) {
   }
 
   return ContentService.createTextOutput('OK');
+}
+
+// 同じSlackイベントを既に処理したかどうかを判定する（再送対策）
+function isDuplicateEvent(eventId) {
+  const cache = CacheService.getScriptCache();
+  const key = 'slack_event_' + eventId;
+  if (cache.get(key)) {
+    return true; // 処理済み
+  }
+  cache.put(key, '1', 600); // 10分間記憶しておく
+  return false;
 }
 
 // ============================================================
@@ -126,6 +143,15 @@ ${html}
 function addRowToSpreadsheet(info, url, spreadsheetId) {
   const ss = SpreadsheetApp.openById(spreadsheetId);
   const sheet = ss.getSheets()[0];
+
+  // 既に同じURLが登録済みなら追加しない（重複防止）
+  const lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    const existingUrls = sheet.getRange(2, 5, lastRow - 1, 1).getValues(); // E列
+    for (let i = 0; i < existingUrls.length; i++) {
+      if (existingUrls[i][0] === url) return;
+    }
+  }
 
   sheet.appendRow([
     info.month        || '',  // A: 月
