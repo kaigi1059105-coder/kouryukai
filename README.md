@@ -1,118 +1,131 @@
 # 交流会管理 自動化システム
 
-営業がSlackにURLを1つ貼るだけで、AIがそのページを読んで交流会情報をすべて抽出し、Googleスプレッドシートに自動登録します。参加決定時はSlackに自動通知し、そのスレッドを活動ログとして使えます。
+Slackに営業が交流会URLを貼ると、AIがページを読んで交流会情報を抽出し、Googleスプレッドシートに自動登録します。スプレッドシートでステータスを「行く」にして担当者を入力すると、Slackに参加決定通知が届きます。
 
-## 全体フロー
+## 今回の構成
 
+- Google Apps Script（`Code.gs`）
+- Slack Events API
+- Slack `chat.postMessage`
+- Google Sheets
+- Gemini API（既定。Claudeも任意で利用可）
+
+Slack Events APIは3秒以内の応答が必要です。そのため、Slackからの受信時はURLをキューに入れてすぐ`OK`を返し、その後GASの一時トリガーでAI抽出とシート登録を実行します。
+
+## スプレッドシート列
+
+| 列 | 内容 |
+|----|------|
+| A | 月 |
+| B | 日時 |
+| C | 場所 |
+| D | 交流会名 |
+| E | URL |
+| F | 主催 |
+| G | 料金 |
+| H | ステータス |
+| I | 担当者 |
+| J | 通知済み |
+
+1行目の見出しは次の通りです。
+
+```text
+月 / 日時 / 場所 / 交流会名 / URL / 主催 / 料金 / ステータス / 担当者 / 通知済み
 ```
-営業がSlackに投稿
- └→「https://xxx.com/event/12345」（URLだけでOK）
-        ↓ 自動
-AIがURLのページを読み込み、以下を抽出：
- ・交流会名 / 日時（月も自動判定）/ 場所 / 主催 / 料金
-        ↓ 自動
-Googleスプレッドシートに1行追加
- ・ステータスは「検討中」で自動セット
- ・担当者は空欄
-        ↓ マーケチームがスプシでステータスと担当者を入力
-ステータス「行く」＋担当者入力を検知
-        ↓ 自動
-Slackに通知（chat.postMessage APIで投稿）：
-「✅【参加決定】交流会名 / 日時 / 場所 / 担当者」
-        ↓ その後
-スレッドに自由に返信できる（活動ログ）
-```
 
-## スプレッドシートの列構成
+## スクリプトプロパティ
 
-| 列 | 内容 | 備考 |
-|----|------|------|
-| A | 月 | 例：6月 |
-| B | 日時 | 例：2026年6月17日（水）19:00〜21:00 |
-| C | 場所 | 例：銀座 |
-| D | 交流会名 | 例：不動産ビジネス 90名 大交流会 in 銀座 |
-| E | URL | 営業が投稿したURL |
-| F | 主催 | 例：コンサルティングジャパン株式会社 |
-| G | 料金 | 例：5000（会員価格は括弧書きで） |
-| H | ステータス | 「行く」「行かない」「検討中」の3択 |
-| I | 担当者 | 例：萩原さん（複数は「境さん/須藤さん」） |
-| J | 通知済み | 自動でセットされる内部フラグ。触らない |
+GASの「プロジェクトの設定」→「スクリプト プロパティ」に次を保存します。
 
-## 使う技術
+| プロパティ名 | 値 |
+|-------------|----|
+| `SPREADSHEET_ID` | `1JjX5YYbrG3rZt2LotjHtk9LMuQn32nF0M955GQbS-Ds` |
+| `SLACK_BOT_TOKEN` | SlackのBot User OAuth Token（`xoxb-...`） |
+| `TARGET_CHANNEL_ID` | URL投稿を監視するチャンネルID。今回: `C0BCJTWJERW` |
+| `SLACK_NOTIFY_CHANNEL` | 通知先チャンネルID。今回: `C0BCJTWJERW` |
+| `AI_PROVIDER` | `gemini` |
+| `GEMINI_API_KEY` | Google AI Studioで作成したAPIキー |
+| `GEMINI_MODEL` | 省略可。既定は`gemini-3.1-flash-lite` |
 
-- **Google Apps Script (GAS)**：全体の司令塔（`Code.gs`）
-- **Slack API（Events API + chat.postMessage）**：URL受信 / スレッド付き通知送信
-- **Claude API (Anthropic)**：URLページを読んで情報を抽出するAI
-- **UrlFetchApp**：URLページのHTML取得
+Claudeを使う場合だけ、`AI_PROVIDER=claude`、`CLAUDE_API_KEY`、必要なら`CLAUDE_MODEL`を設定します。
 
-通知をスレッド返信可能にするため、Incoming Webhook ではなく Slack の `chat.postMessage` API を使用しています。
+## Gemini APIキー取得
 
-## セットアップ手順
+1. Google AI Studioを開く: https://aistudio.google.com/
+2. 「Get API key」または「API keys」を開く
+3. 新しいAPIキーを作成する
+4. GASのスクリプトプロパティに`GEMINI_API_KEY`として保存する
 
-### 1. Slack Appの作成
+無料枠の範囲で始めたい場合は、まずGeminiの無料枠で動作確認してください。利用量が増える場合はGoogle側の料金ページで最新の制限を確認します。
 
-1. https://api.slack.com/apps にアクセス
-2. 「Create New App」→「From scratch」
-3. アプリ名（例：交流会Bot）とワークスペースを選択
+## Slack App設定
 
-**Bot Token Scopes**（「OAuth & Permissions」→「Scopes」→「Bot Token Scopes」）：
+### OAuth Scopes
 
+`bot-test` がプライベートチャンネルの場合は、通常のチャンネル用スコープだけではイベントを読めません。以下をBot Token Scopesに入れて、再インストールしてください。
+
+- `chat:write`
 - `channels:history`
 - `channels:read`
-- `chat:write` ← スレッド付き投稿に必要
+- `groups:history`
+- `groups:read`
 
-**アプリのインストール：** 「Install App」→「Install to Workspace」→ 許可 → 表示された「Bot User OAuth Token（xoxb-...）」をコピーして控える。
+公開チャンネルだけなら`channels:*`で足りますが、今回の`bot-test`はプライベートとのことなので`groups:*`も入れるのが安全です。
 
-**Event Subscriptions**（GASデプロイ後に設定）：「Enable Events」をON →「Request URL」にGASのデプロイURLを入力 →「Subscribe to bot events」で `message.channels` を追加 →「Save Changes」。
+### Event Subscriptions
 
-**Botをチャンネルに招待：** Slackで対象チャンネルを開き `/invite @交流会Bot`。URLを受信するチャンネルと通知を送るチャンネルの両方に招待する。
+GASをWebアプリとしてデプロイしたあと、Slack AppのEvent Subscriptionsを設定します。
 
-### 2. GASのセットアップ
+1. 「Event Subscriptions」を開く
+2. 「Enable Events」をON
+3. 「Request URL」にGASのWebアプリURLを貼る
+4. 「Subscribe to bot events」に以下を追加
+   - 公開チャンネル: `message.channels`
+   - プライベートチャンネル: `message.groups`
+5. 「Save Changes」
 
-1. 対象のGoogleスプレッドシートを開く
+設定後、Slackの`bot-test`で次を実行します。
+
+```text
+/invite @交流会管理くん
+```
+
+## GASデプロイ
+
+1. Googleスプレッドシートを開く
 2. 「拡張機能」→「Apps Script」
-3. `Code.gs` の内容を貼り付けて保存
+3. `Code.gs`を貼り替えて保存
+4. スクリプトプロパティを保存
+5. 「デプロイ」→「新しいデプロイ」
+6. 種類: 「ウェブアプリ」
+7. 実行ユーザー: 「自分」
+8. アクセスできるユーザー: 「全員」
+9. デプロイURLをSlack Event SubscriptionsのRequest URLに貼る
 
-**スクリプトプロパティ**（「プロジェクトの設定（歯車）」→「スクリプト プロパティ」）：
+初回実行時は、Google Sheets、UrlFetch、ScriptAppトリガーなどの権限許可が出ます。
 
-| プロパティ名 | 値の取得場所 |
-|-------------|-------------|
-| SLACK_BOT_TOKEN | Slack App「OAuth & Permissions」のBot User OAuth Token |
-| SLACK_NOTIFY_CHANNEL | 通知を送りたいチャンネルID |
-| CLAUDE_API_KEY | https://console.anthropic.com でAPIキーを発行 |
-| SPREADSHEET_ID | スプレッドシートURLの `/d/` と `/edit` の間の文字列 |
-| TARGET_CHANNEL_ID | URLを投稿するチャンネルのID |
+## onEditトリガー
 
-（チャンネルIDはチャンネル名を右クリック→「チャンネル詳細」→一番下で確認できます）
+Slack通知には`UrlFetchApp`を使うため、シンプルトリガーではなくインストール型トリガーが必要です。
 
-### 3. GASのデプロイ
-
-1. 「デプロイ」→「新しいデプロイ」
-2. 種類：「ウェブアプリ」
-3. 実行ユーザー：「自分」
-4. アクセスできるユーザー：「全員」
-5. 「デプロイ」→ 表示されたURLをコピー → Slack AppのEvent SubscriptionsのRequest URLに貼る
-
-### 4. onEditトリガーの設定
-
-`onEdit` で `UrlFetchApp` を使うため、シンプルトリガーではなくインストール型トリガーが必要です。
-
-1. GASエディタ左メニュー「トリガー（時計アイコン）」
+1. GASエディタ左メニューの「トリガー」
 2. 「トリガーを追加」
-3. 実行する関数：`onEdit`
-4. イベントのソース：「スプレッドシートから」
-5. イベントの種類：「編集時」
+3. 実行する関数: `onEdit`
+4. イベントのソース: 「スプレッドシートから」
+5. イベントの種類: 「編集時」
 6. 保存
 
-### 5. 動作確認
+## 動作確認
 
-- **機能①：** Slackの対象チャンネルに交流会URLを貼って送信 → 数秒後にスプレッドシートに1行追加されればOK
-- **機能②：** スプレッドシートのH列を「行く」、I列に担当者名を入力 → Slackに参加決定通知が届き、スレッド返信できればOK
+1. `bot-test`に`/invite @交流会管理くん`を投稿
+2. `bot-test`に交流会URLを1つ投稿
+3. 1分程度待つ
+4. スプレッドシートに1行追加されることを確認
+5. H列を`行く`、I列に担当者名を入力
+6. Slackに参加決定通知が届くことを確認
 
-## 補足
+## 重複対策
 
-- Botの投稿に「このスレッドにメモを残してください」の一文を添えるので、チームへの使い方の説明が不要になります。
-- J列（通知済みフラグ）は自動でセットされます。削除しないでください。
-- Claude APIの料金は1件あたり約0.01〜0.05円です。
-- connpass・Peatix・こくちーずなど主要イベントサイトはHTML取得可能です。
-- **重複登録対策：** Slackがイベントをまれに再送しても、`event_id` の記憶（CacheService）と同一URLのチェックにより、同じ交流会が二重に登録されないようになっています。
+- Slackの`event_id`を10分間キャッシュし、再送イベントを無視します。
+- シートのE列に同じURLがすでにある場合は、行を追加しません。
+- キュー内でも同一URL・同一イベントIDを重複登録しません。
