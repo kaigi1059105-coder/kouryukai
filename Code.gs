@@ -185,10 +185,15 @@ function processEventUrl(url, config) {
         'User-Agent': 'Mozilla/5.0 (compatible; KouryukaiBot/1.0)',
       },
     });
-    const html = response.getContentText('UTF-8').substring(0, 12000);
+    const html = response.getContentText('UTF-8');
+    const pageText = htmlToReadableText(html).substring(0, 20000);
 
-    const extracted = extractEventInfo(html, url, config);
+    const extracted = extractEventInfo(pageText, url, config);
     if (!extracted) return;
+    if (!hasExtractedEventInfo(extracted)) {
+      console.error('No event info extracted for URL:', url);
+      return;
+    }
 
     addRowToSpreadsheet(extracted, url, config.spreadsheetId);
   } catch (err) {
@@ -196,19 +201,39 @@ function processEventUrl(url, config) {
   }
 }
 
-function extractEventInfo(html, url, config) {
-  if (config.aiProvider === 'claude') {
-    return extractEventInfoWithClaude(html, url, config);
-  }
-  return extractEventInfoWithGemini(html, url, config);
+function htmlToReadableText(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/(p|div|section|article|h1|h2|h3|li|tr|table)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/\n\s*\n\s*\n/g, '\n\n')
+    .replace(/[ \t]+/g, ' ')
+    .trim();
 }
 
-function buildExtractionPrompt(html, url) {
+function extractEventInfo(pageText, url, config) {
+  if (config.aiProvider === 'claude') {
+    return extractEventInfoWithClaude(pageText, url, config);
+  }
+  return extractEventInfoWithGemini(pageText, url, config);
+}
+
+function buildExtractionPrompt(pageText, url) {
   return `
-以下は交流会・イベントページのHTMLです。
+以下は交流会・イベントページから抽出した本文です。
 URL: ${url}
 
-このHTMLから交流会情報をJSON形式で抽出してください。
+この本文から交流会情報をJSON形式で抽出してください。
 情報が見つからない項目は空文字("")にしてください。
 JSON以外の説明文は返さないでください。
 
@@ -220,12 +245,12 @@ JSON以外の説明文は返さないでください。
 - organizer: 主催者・運営会社名
 - price: 参加料金（例: 無料、5000、5000（3000））
 
-HTML:
-${html}
+本文:
+${pageText}
 `;
 }
 
-function extractEventInfoWithGemini(html, url, config) {
+function extractEventInfoWithGemini(pageText, url, config) {
   if (!config.geminiApiKey) {
     throw new Error('GEMINI_API_KEY is not set.');
   }
@@ -242,7 +267,7 @@ function extractEventInfoWithGemini(html, url, config) {
     payload: JSON.stringify({
       contents: [{
         role: 'user',
-        parts: [{ text: buildExtractionPrompt(html, url) }],
+        parts: [{ text: buildExtractionPrompt(pageText, url) }],
       }],
       generationConfig: {
         temperature: 0,
@@ -266,7 +291,7 @@ function extractEventInfoWithGemini(html, url, config) {
   return parseJsonObject(text || '');
 }
 
-function extractEventInfoWithClaude(html, url, config) {
+function extractEventInfoWithClaude(pageText, url, config) {
   if (!config.claudeApiKey) {
     throw new Error('CLAUDE_API_KEY is not set.');
   }
@@ -281,7 +306,7 @@ function extractEventInfoWithClaude(html, url, config) {
     payload: JSON.stringify({
       model: config.claudeModel,
       max_tokens: 512,
-      messages: [{ role: 'user', content: buildExtractionPrompt(html, url) }],
+      messages: [{ role: 'user', content: buildExtractionPrompt(pageText, url) }],
     }),
     muteHttpExceptions: true,
   });
@@ -306,6 +331,12 @@ function parseJsonObject(text) {
     console.error('JSON parse error:', text);
     return null;
   }
+}
+
+function hasExtractedEventInfo(info) {
+  return ['month', 'date', 'location', 'event_name', 'organizer', 'price'].some(function(key) {
+    return String(info[key] || '').trim() !== '';
+  });
 }
 
 function isUrlAlreadyRegistered(url, spreadsheetId) {
