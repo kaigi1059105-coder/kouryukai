@@ -515,19 +515,17 @@ function applySheetStyleAndValidation(sheet) {
   sheet.getRange(2, 8, maxRows, 1).setDataValidation(statusRule);
   sheet.getRange(2, 12, maxRows, 1).setDataValidation(sendRule);
 
+  recreateSheetFilter(sheet);
+}
+
+function recreateSheetFilter(sheet) {
   const existingFilter = sheet.getFilter();
-  if (!existingFilter) {
-    sheet.getRange(1, 1, Math.max(sheet.getMaxRows(), 2), COLUMN_COUNT).createFilter();
-  } else {
-    try {
-      if (existingFilter.getRange().getNumColumns() < COLUMN_COUNT) {
-        existingFilter.remove();
-        sheet.getRange(1, 1, Math.max(sheet.getMaxRows(), 2), COLUMN_COUNT).createFilter();
-      }
-    } catch (err) {
-      console.error('Filter update error:', err);
-    }
+  if (existingFilter) {
+    existingFilter.remove();
   }
+
+  const filterRowCount = Math.max(sheet.getMaxRows(), 2);
+  sheet.getRange(1, 1, filterRowCount, COLUMN_COUNT).createFilter();
 }
 
 function setupKouryukaiSheet() {
