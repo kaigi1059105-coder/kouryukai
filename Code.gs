@@ -9,6 +9,21 @@ const QUEUE_PROPERTY_KEY = 'PENDING_EVENT_URLS';
 const DEFAULT_AI_PROVIDER = 'gemini';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-20250514';
+const COLUMN_COUNT = 12;
+const HEADERS = [
+  '月',
+  '日時',
+  '場所',
+  '交流会名',
+  'URL',
+  '主催',
+  '料金',
+  'ステータス',
+  '担当者',
+  '通知済み',
+  '目標リード',
+  '目標アポ',
+];
 
 function getConfig() {
   const props = PropertiesService.getScriptProperties();
@@ -24,7 +39,19 @@ function getConfig() {
     slackNotifyChannel: props.getProperty('SLACK_NOTIFY_CHANNEL'),
     spreadsheetId: props.getProperty('SPREADSHEET_ID'),
     targetChannelId: props.getProperty('TARGET_CHANNEL_ID'),
+    slackMentionMap: parseMentionMap(props.getProperty('SLACK_MENTION_MAP')),
   };
+}
+
+function parseMentionMap(rawValue) {
+  if (!rawValue) return {};
+
+  try {
+    return JSON.parse(rawValue);
+  } catch (err) {
+    console.error('SLACK_MENTION_MAP parse error:', err);
+    return {};
+  }
 }
 
 // ============================================================
@@ -202,7 +229,9 @@ function processEventUrl(url, config) {
 }
 
 function htmlToReadableText(html) {
-  return String(html || '')
+  const source = String(html || '');
+  const metadataText = extractMetadataText(source);
+  const bodyText = source
     .replace(/<script[\s\S]*?<\/script>/gi, ' ')
     .replace(/<style[\s\S]*?<\/style>/gi, ' ')
     .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
@@ -219,6 +248,36 @@ function htmlToReadableText(html) {
     .replace(/\n\s*\n\s*\n/g, '\n\n')
     .replace(/[ \t]+/g, ' ')
     .trim();
+
+  return (metadataText + '\n\n' + bodyText).trim();
+}
+
+function extractMetadataText(html) {
+  const values = [];
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  if (titleMatch) values.push(titleMatch[1]);
+
+  const metaRegex = /<meta\s+[^>]*(?:name|property)=["'](?:description|og:title|og:description|twitter:title|twitter:description)["'][^>]*content=["']([^"']*)["'][^>]*>/gi;
+  let match;
+  while ((match = metaRegex.exec(html)) !== null) {
+    values.push(match[1]);
+  }
+
+  return values
+    .map(function(value) {
+      return value
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .trim();
+    })
+    .filter(function(value) {
+      return value !== '';
+    })
+    .join('\n');
 }
 
 function extractEventInfo(pageText, url, config) {
@@ -334,13 +393,13 @@ function parseJsonObject(text) {
 }
 
 function hasExtractedEventInfo(info) {
-  return ['month', 'date', 'location', 'event_name', 'organizer', 'price'].some(function(key) {
-    return String(info[key] || '').trim() !== '';
-  });
+  return String(info.date || '').trim() !== '' &&
+    String(info.event_name || '').trim() !== '';
 }
 
 function isUrlAlreadyRegistered(url, spreadsheetId) {
   const sheet = SpreadsheetApp.openById(spreadsheetId).getSheets()[0];
+  ensureSheetHeaders(sheet);
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
 
@@ -354,6 +413,7 @@ function addRowToSpreadsheet(info, url, spreadsheetId) {
   if (isUrlAlreadyRegistered(url, spreadsheetId)) return;
 
   const sheet = SpreadsheetApp.openById(spreadsheetId).getSheets()[0];
+  ensureSheetHeaders(sheet);
   sheet.appendRow([
     info.month || '',
     info.date || '',
@@ -365,7 +425,80 @@ function addRowToSpreadsheet(info, url, spreadsheetId) {
     '検討中',
     '',
     '',
+    '',
+    '',
   ]);
+  sortAndGroupRows(sheet);
+}
+
+function ensureSheetHeaders(sheet) {
+  const existingHeaders = sheet.getRange(1, 1, 1, COLUMN_COUNT).getValues()[0];
+  const needsUpdate = HEADERS.some(function(header, index) {
+    return existingHeaders[index] !== header;
+  });
+  if (needsUpdate) {
+    sheet.getRange(1, 1, 1, COLUMN_COUNT).setValues([HEADERS]);
+  }
+}
+
+function sortAndGroupRows(sheet) {
+  ensureSheetHeaders(sheet);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const existingRows = sheet.getRange(2, 1, lastRow - 1, COLUMN_COUNT).getValues();
+  const dataRows = existingRows.filter(function(row) {
+    return row.some(function(value) {
+      return String(value || '').trim() !== '';
+    });
+  });
+
+  dataRows.sort(function(a, b) {
+    return getDateSortKey(a[1], a[0]) - getDateSortKey(b[1], b[0]);
+  });
+
+  const outputRows = [];
+  let previousMonth = '';
+  dataRows.forEach(function(row) {
+    const rowMonth = String(row[0] || getMonthFromDateText(row[1]) || '').trim();
+    if (previousMonth && rowMonth && rowMonth !== previousMonth) {
+      outputRows.push(new Array(COLUMN_COUNT).fill(''));
+    }
+    if (!row[0] && rowMonth) row[0] = rowMonth;
+    outputRows.push(row);
+    if (rowMonth) previousMonth = rowMonth;
+  });
+
+  sheet.getRange(2, 1, lastRow - 1, COLUMN_COUNT).clearContent();
+  if (outputRows.length > 0) {
+    sheet.getRange(2, 1, outputRows.length, COLUMN_COUNT).setValues(outputRows);
+  }
+}
+
+function getDateSortKey(dateValue, monthValue) {
+  if (Object.prototype.toString.call(dateValue) === '[object Date]' && !isNaN(dateValue.getTime())) {
+    return dateValue.getTime();
+  }
+
+  const text = String(dateValue || '');
+  const match = text.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
+  if (match) {
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
+  }
+
+  const monthMatch = String(monthValue || text).match(/(\d{1,2})月/);
+  if (monthMatch) {
+    return new Date(2099, Number(monthMatch[1]) - 1, 1).getTime();
+  }
+
+  return new Date(2999, 0, 1).getTime();
+}
+
+function getMonthFromDateText(dateValue) {
+  const text = String(dateValue || '');
+  const match = text.match(/(\d{1,2})月/);
+  return match ? match[1] + '月' : '';
 }
 
 // ============================================================
@@ -376,23 +509,52 @@ function onEdit(e) {
   const row = e.range.getRow();
   const col = e.range.getColumn();
 
+  ensureSheetHeaders(sheet);
+
   if (row <= 1) return;
-  if (col !== 8 && col !== 9) return;
+  if (isBlankDataRow(sheet, row)) return;
 
   const status = sheet.getRange(row, 8).getValue();
+  if (isDeclinedStatus(status)) {
+    sheet.deleteRow(row);
+    sortAndGroupRows(sheet);
+    return;
+  }
+
+  if (![2, 8, 9, 11, 12].includes(col)) {
+    sortAndGroupRows(sheet);
+    return;
+  }
+
   const assignee = sheet.getRange(row, 9).getValue();
-  if (!isConfirmedStatus(status) || assignee === '') return;
+  const targetLead = sheet.getRange(row, 11).getValue();
+  const targetAppointment = sheet.getRange(row, 12).getValue();
+  if (!isReadyToNotify(status, assignee, targetLead, targetAppointment)) {
+    sortAndGroupRows(sheet);
+    return;
+  }
 
   const notified = sheet.getRange(row, 10).getValue();
-  if (notified === '通知済み') return;
+  if (notified === '通知済み') {
+    sortAndGroupRows(sheet);
+    return;
+  }
 
   const eventName = sheet.getRange(row, 4).getValue();
   const date = sheet.getRange(row, 2).getValue();
   const location = sheet.getRange(row, 3).getValue();
   const url = sheet.getRange(row, 5).getValue();
 
-  postSlackMessage(eventName, date, location, assignee, url);
+  postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment);
   sheet.getRange(row, 10).setValue('通知済み');
+  sortAndGroupRows(sheet);
+}
+
+function isBlankDataRow(sheet, row) {
+  const values = sheet.getRange(row, 1, 1, COLUMN_COUNT).getValues()[0];
+  return values.every(function(value) {
+    return String(value || '').trim() === '';
+  });
 }
 
 function isConfirmedStatus(status) {
@@ -400,12 +562,25 @@ function isConfirmedStatus(status) {
   return normalized === '参加確定' || normalized === '行く';
 }
 
-function formatAssigneeNames(assignee) {
+function isDeclinedStatus(status) {
+  const normalized = String(status || '').trim();
+  return normalized === '不参加' || normalized === '行かない';
+}
+
+function isReadyToNotify(status, assignee, targetLead, targetAppointment) {
+  return isConfirmedStatus(status) &&
+    String(assignee || '').trim() !== '' &&
+    String(targetLead || '').trim() !== '' &&
+    String(targetAppointment || '').trim() !== '';
+}
+
+function formatAssigneeNames(assignee, mentionMap) {
   return String(assignee || '')
     .split(/[\/／、,，\s]+/)
     .map(function(name) {
       const trimmed = name.trim();
       if (!trimmed) return '';
+      if (mentionMap && mentionMap[trimmed]) return mentionMap[trimmed];
       return /さん$|様$/.test(trimmed) ? trimmed : trimmed + 'さん';
     })
     .filter(function(name) {
@@ -414,12 +589,14 @@ function formatAssigneeNames(assignee) {
     .join('、');
 }
 
-function postSlackMessage(eventName, date, location, assignee, url) {
+function postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment) {
   const config = getConfig();
-  const assigneeText = formatAssigneeNames(assignee);
+  const assigneeText = formatAssigneeNames(assignee, config.slackMentionMap);
 
   const messageText =
-    date + 'に' + assigneeText + '参加確定です！！\n\n' +
+    date + '頃に' + assigneeText + '参加確定です！！\n\n' +
+    '目標リード：' + targetLead + '件　目標アポ数：' + targetAppointment + '件\n' +
+    '交流会参加後はこのスレッドに報告よろしくお願いいたします\n\n' +
     '交流会：' + eventName + '\n' +
     '場所：' + location + '\n' +
     'URL：' + url;
