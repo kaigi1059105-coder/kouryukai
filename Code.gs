@@ -350,7 +350,7 @@ function onEdit(e) {
 
   const status = sheet.getRange(row, 8).getValue();
   const assignee = sheet.getRange(row, 9).getValue();
-  if (status !== '行く' || assignee === '') return;
+  if (!isConfirmedStatus(status) || assignee === '') return;
 
   const notified = sheet.getRange(row, 10).getValue();
   if (notified === '通知済み') return;
@@ -364,17 +364,34 @@ function onEdit(e) {
   sheet.getRange(row, 10).setValue('通知済み');
 }
 
+function isConfirmedStatus(status) {
+  const normalized = String(status || '').trim();
+  return normalized === '参加確定' || normalized === '行く';
+}
+
+function formatAssigneeNames(assignee) {
+  return String(assignee || '')
+    .split(/[\/／、,，\s]+/)
+    .map(function(name) {
+      const trimmed = name.trim();
+      if (!trimmed) return '';
+      return /さん$|様$/.test(trimmed) ? trimmed : trimmed + 'さん';
+    })
+    .filter(function(name) {
+      return name !== '';
+    })
+    .join('、');
+}
+
 function postSlackMessage(eventName, date, location, assignee, url) {
   const config = getConfig();
+  const assigneeText = formatAssigneeNames(assignee);
 
   const messageText =
-    '✅ *【参加決定】*\n' +
-    '*交流会名：* ' + eventName + '\n' +
-    '*日時：* ' + date + '\n' +
-    '*場所：* ' + location + '\n' +
-    '*担当者：* ' + assignee + '\n' +
-    '*URL：* ' + url + '\n\n' +
-    '_このスレッドに参加後のメモや報告を残してください。_';
+    date + 'に' + assigneeText + '参加確定です！！\n\n' +
+    '交流会：' + eventName + '\n' +
+    '場所：' + location + '\n' +
+    'URL：' + url;
 
   const response = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
     method: 'post',
