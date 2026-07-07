@@ -31,10 +31,12 @@ function getConfig() {
 // Slack Events API 受信
 // ============================================================
 function doPost(e) {
-  const data = JSON.parse(e.postData.contents);
+  const data = parseSlackRequest(e);
 
   if (data.type === 'url_verification') {
-    return ContentService.createTextOutput(data.challenge);
+    return ContentService
+      .createTextOutput(data.challenge || '')
+      .setMimeType(ContentService.MimeType.TEXT);
   }
 
   if (data.event_id && isDuplicateEvent(data.event_id)) {
@@ -63,6 +65,33 @@ function doPost(e) {
   }
 
   return ContentService.createTextOutput('OK');
+}
+
+function doGet() {
+  return ContentService
+    .createTextOutput('OK')
+    .setMimeType(ContentService.MimeType.TEXT);
+}
+
+function parseSlackRequest(e) {
+  const rawBody = e && e.postData && e.postData.contents ? e.postData.contents : '';
+  if (rawBody) {
+    try {
+      return JSON.parse(rawBody);
+    } catch (err) {
+      console.error('JSON request parse failed:', err);
+    }
+  }
+
+  if (e && e.parameter && e.parameter.payload) {
+    try {
+      return JSON.parse(e.parameter.payload);
+    } catch (err) {
+      console.error('Payload request parse failed:', err);
+    }
+  }
+
+  return e && e.parameter ? e.parameter : {};
 }
 
 function extractFirstUrl(text) {
