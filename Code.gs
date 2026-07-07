@@ -240,8 +240,11 @@ function processEventUrl(url, config) {
     const html = response.getContentText('UTF-8');
     const pageText = htmlToReadableText(html).substring(0, 20000);
 
-    const extracted = extractEventInfo(pageText, url, config);
-    if (!extracted) return;
+    const extracted = mergeWithFallbackEventInfo(
+      extractEventInfo(pageText, url, config),
+      pageText,
+      url
+    );
     if (!hasExtractedEventInfo(extracted)) {
       console.error('No event info extracted for URL:', url);
       return;
@@ -420,6 +423,85 @@ function parseJsonObject(text) {
 function hasExtractedEventInfo(info) {
   return String(info.date || '').trim() !== '' &&
     String(info.event_name || '').trim() !== '';
+}
+
+function mergeWithFallbackEventInfo(aiInfo, pageText, url) {
+  const fallbackInfo = extractEventInfoFallback(pageText, url);
+  const result = {};
+  ['month', 'date', 'location', 'event_name', 'organizer', 'price'].forEach(function(key) {
+    result[key] = String((aiInfo && aiInfo[key]) || '').trim() ||
+      String(fallbackInfo[key] || '').trim();
+  });
+  return result;
+}
+
+function extractEventInfoFallback(pageText, url) {
+  const text = String(pageText || '');
+  const lines = text
+    .split(/\n+/)
+    .map(function(line) {
+      return line.trim();
+    })
+    .filter(function(line) {
+      return line !== '';
+    });
+
+  const date = extractDateFallback(text);
+  return {
+    event_name: extractEventNameFallback(lines, url),
+    date: date,
+    month: getMonthFromDateText(date),
+    location: extractLocationFallback(text),
+    organizer: extractOrganizerFallback(text),
+    price: extractPriceFallback(text),
+  };
+}
+
+function extractEventNameFallback(lines, url) {
+  for (let i = 0; i < Math.min(lines.length, 15); i++) {
+    const line = lines[i]
+      .replace(/\s*[-|]\s*こくちーずプロ.*$/i, '')
+      .replace(/\s*[-|]\s*Peatix.*$/i, '')
+      .replace(/\s*[-|]\s*connpass.*$/i, '')
+      .trim();
+    if (line.length >= 8 && !line.match(/^https?:\/\//) && line.indexOf('ログイン') === -1) {
+      return line;
+    }
+  }
+
+  return url;
+}
+
+function extractDateFallback(text) {
+  const fullDateMatch = text.match(/20\d{2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日[^\n]{0,40}(?:\d{1,2}[:：]\d{2}[^\n]{0,30})?/);
+  if (fullDateMatch) return fullDateMatch[0].replace(/\s+/g, '');
+
+  const shortDateMatch = text.match(/\d{1,2}\s*月\s*\d{1,2}\s*日[^\n]{0,40}(?:\d{1,2}[:：]\d{2}[^\n]{0,30})?/);
+  if (shortDateMatch) return shortDateMatch[0].replace(/\s+/g, '');
+
+  return '';
+}
+
+function extractLocationFallback(text) {
+  const areaMatch = text.match(/[（(](東京都|大阪府|京都府|北海道|.{2,3}県)[）)]/);
+  if (areaMatch) return areaMatch[1];
+
+  const locationMatch = text.match(/(?:会場|場所|開催場所)[:：]\s*([^\n]+)/);
+  return locationMatch ? locationMatch[1].trim() : '';
+}
+
+function extractOrganizerFallback(text) {
+  const organizerMatch = text.match(/(?:主催|主催者|運営)[:：]\s*([^\n]+)/);
+  return organizerMatch ? organizerMatch[1].trim() : '';
+}
+
+function extractPriceFallback(text) {
+  if (text.match(/(?:参加費|料金|登録料|手数料)[^\n]{0,20}無料|無料[^\n]{0,20}(?:参加|登録料|手数料)/)) {
+    return '無料';
+  }
+
+  const priceMatch = text.match(/(?:参加費|料金|会費)[^\n]{0,20}([0-9,]+)\s*円?/);
+  return priceMatch ? priceMatch[1].replace(/,/g, '') : '';
 }
 
 function isUrlAlreadyRegistered(url, spreadsheetId) {
