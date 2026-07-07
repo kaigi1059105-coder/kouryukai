@@ -123,9 +123,33 @@ function parseSlackRequest(e) {
 }
 
 function extractFirstUrl(text) {
-  const match = text.match(/https?:\/\/[^\s>|]+/);
-  if (!match) return '';
-  return match[0].replace(/[),.。]+$/, '');
+  const normalizedText = String(text || '');
+  const protocolMatch = normalizedText.match(/https?:\/\/[^\s>|]+/);
+  if (protocolMatch) return cleanExtractedUrl(protocolMatch[0]);
+
+  const domainMatch = normalizedText.match(/\b(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?:\/[^\s>|]*)?/i);
+  if (!domainMatch) return '';
+
+  const candidate = domainMatch[0];
+  if (isIgnoredDomainCandidate(candidate)) return '';
+
+  return cleanExtractedUrl('https://' + candidate);
+}
+
+function cleanExtractedUrl(url) {
+  return String(url || '')
+    .replace(/[)\],.。]+$/, '');
+}
+
+function isIgnoredDomainCandidate(candidate) {
+  const normalized = String(candidate || '').toLowerCase();
+  return normalized === '' ||
+    normalized.indexOf('@') !== -1 ||
+    normalized.endsWith('.jpg') ||
+    normalized.endsWith('.jpeg') ||
+    normalized.endsWith('.png') ||
+    normalized.endsWith('.gif') ||
+    normalized.endsWith('.webp');
 }
 
 function isDuplicateEvent(eventId) {
