@@ -9,7 +9,7 @@ const QUEUE_PROPERTY_KEY = 'PENDING_EVENT_URLS';
 const DEFAULT_AI_PROVIDER = 'gemini';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const COLUMN_COUNT = 12;
+const COLUMN_COUNT = 13;
 const HEADERS = [
   '月',
   '日時',
@@ -20,9 +20,10 @@ const HEADERS = [
   '料金',
   'ステータス',
   '担当者',
-  '通知済み',
   '目標リード',
   '目標アポ',
+  '通知を送る',
+  '通知済み',
 ];
 
 function getConfig() {
@@ -427,11 +428,14 @@ function addRowToSpreadsheet(info, url, spreadsheetId) {
     '',
     '',
     '',
+    '',
   ]);
   sortAndGroupRows(sheet);
 }
 
 function ensureSheetHeaders(sheet) {
+  migrateOldColumnLayout(sheet);
+
   const existingHeaders = sheet.getRange(1, 1, 1, COLUMN_COUNT).getValues()[0];
   const needsUpdate = HEADERS.some(function(header, index) {
     return existingHeaders[index] !== header;
@@ -439,6 +443,98 @@ function ensureSheetHeaders(sheet) {
   if (needsUpdate) {
     sheet.getRange(1, 1, 1, COLUMN_COUNT).setValues([HEADERS]);
   }
+
+  applySheetStyleAndValidation(sheet);
+}
+
+function migrateOldColumnLayout(sheet) {
+  const oldHeaders = sheet.getRange(1, 1, 1, 12).getValues()[0];
+  const isOldLayout = oldHeaders[9] === '通知済み' &&
+    oldHeaders[10] === '目標リード' &&
+    oldHeaders[11] === '目標アポ';
+
+  if (!isOldLayout) return;
+
+  const lastRow = Math.max(sheet.getLastRow(), 1);
+  const oldRows = sheet.getRange(1, 1, lastRow, 12).getValues();
+  const newRows = oldRows.map(function(row, index) {
+    if (index === 0) return HEADERS.slice();
+
+    return [
+      row[0],
+      row[1],
+      row[2],
+      row[3],
+      row[4],
+      row[5],
+      row[6],
+      row[7],
+      row[8],
+      row[10],
+      row[11],
+      '',
+      row[9],
+    ];
+  });
+
+  sheet.getRange(1, 1, lastRow, COLUMN_COUNT).setValues(newRows);
+}
+
+function applySheetStyleAndValidation(sheet) {
+  sheet.setFrozenRows(1);
+  sheet.getRange(1, 1, 1, COLUMN_COUNT)
+    .setBackground('#1f4e79')
+    .setFontColor('#ffffff')
+    .setFontWeight('bold');
+
+  const maxRows = Math.max(sheet.getMaxRows() - 1, 1);
+  sheet.getRange(2, 1, maxRows, 1).setBackground('#eaf3f8');
+  sheet.getRange(2, 2, maxRows, 2).setBackground('#f7fbff');
+  sheet.getRange(2, 4, maxRows, 3).setBackground('#ffffff');
+  sheet.getRange(2, 7, maxRows, 1).setBackground('#fff7e6');
+  sheet.getRange(2, 8, maxRows, 1).setBackground('#eaf7ea');
+  sheet.getRange(2, 9, maxRows, 1).setBackground('#fff2cc');
+  sheet.getRange(2, 10, maxRows, 2).setBackground('#f3e8ff');
+  sheet.getRange(2, 12, maxRows, 1).setBackground('#ffecec');
+  sheet.getRange(2, 13, maxRows, 1).setBackground('#eeeeee');
+
+  const monthRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'], true)
+    .setAllowInvalid(true)
+    .build();
+  const statusRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['検討中', '参加確定', '不参加'], true)
+    .setAllowInvalid(true)
+    .build();
+  const sendRule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(['送る', '送らない'], true)
+    .setAllowInvalid(true)
+    .build();
+
+  sheet.getRange(2, 1, maxRows, 1).setDataValidation(monthRule);
+  sheet.getRange(2, 8, maxRows, 1).setDataValidation(statusRule);
+  sheet.getRange(2, 12, maxRows, 1).setDataValidation(sendRule);
+
+  const existingFilter = sheet.getFilter();
+  if (!existingFilter) {
+    sheet.getRange(1, 1, Math.max(sheet.getMaxRows(), 2), COLUMN_COUNT).createFilter();
+  } else {
+    try {
+      if (existingFilter.getRange().getNumColumns() < COLUMN_COUNT) {
+        existingFilter.remove();
+        sheet.getRange(1, 1, Math.max(sheet.getMaxRows(), 2), COLUMN_COUNT).createFilter();
+      }
+    } catch (err) {
+      console.error('Filter update error:', err);
+    }
+  }
+}
+
+function setupKouryukaiSheet() {
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.spreadsheetId).getSheets()[0];
+  ensureSheetHeaders(sheet);
+  sortAndGroupRows(sheet);
 }
 
 function sortAndGroupRows(sheet) {
@@ -521,20 +617,21 @@ function onEdit(e) {
     return;
   }
 
-  if (![2, 8, 9, 11, 12].includes(col)) {
+  if (![2, 8, 9, 10, 11, 12].includes(col)) {
     sortAndGroupRows(sheet);
     return;
   }
 
   const assignee = sheet.getRange(row, 9).getValue();
-  const targetLead = sheet.getRange(row, 11).getValue();
-  const targetAppointment = sheet.getRange(row, 12).getValue();
-  if (!isReadyToNotify(status, assignee, targetLead, targetAppointment)) {
+  const targetLead = sheet.getRange(row, 10).getValue();
+  const targetAppointment = sheet.getRange(row, 11).getValue();
+  const sendFlag = sheet.getRange(row, 12).getValue();
+  if (!isReadyToNotify(status, assignee, targetLead, targetAppointment, sendFlag)) {
     sortAndGroupRows(sheet);
     return;
   }
 
-  const notified = sheet.getRange(row, 10).getValue();
+  const notified = sheet.getRange(row, 13).getValue();
   if (notified === '通知済み') {
     sortAndGroupRows(sheet);
     return;
@@ -546,7 +643,7 @@ function onEdit(e) {
   const url = sheet.getRange(row, 5).getValue();
 
   postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment);
-  sheet.getRange(row, 10).setValue('通知済み');
+  sheet.getRange(row, 13).setValue('通知済み');
   sortAndGroupRows(sheet);
 }
 
@@ -567,11 +664,12 @@ function isDeclinedStatus(status) {
   return normalized === '不参加' || normalized === '行かない';
 }
 
-function isReadyToNotify(status, assignee, targetLead, targetAppointment) {
+function isReadyToNotify(status, assignee, targetLead, targetAppointment, sendFlag) {
   return isConfirmedStatus(status) &&
     String(assignee || '').trim() !== '' &&
     String(targetLead || '').trim() !== '' &&
-    String(targetAppointment || '').trim() !== '';
+    String(targetAppointment || '').trim() !== '' &&
+    String(sendFlag || '').trim() === '送る';
 }
 
 function formatAssigneeNames(assignee, mentionMap) {
