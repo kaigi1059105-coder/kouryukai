@@ -79,7 +79,7 @@ function doPost(e) {
       return ContentService.createTextOutput('OK');
     }
 
-    const url = extractFirstUrl(event.text || '');
+    const url = extractFirstUrlFromSlackEvent(event);
     if (url) {
       enqueueEventUrl({
         url: url,
@@ -120,6 +120,48 @@ function parseSlackRequest(e) {
   }
 
   return e && e.parameter ? e.parameter : {};
+}
+
+function extractFirstUrlFromSlackEvent(event) {
+  const candidates = [];
+  collectSlackUrlCandidates(event, candidates);
+
+  for (let i = 0; i < candidates.length; i++) {
+    const url = extractFirstUrl(candidates[i]);
+    if (url) return url;
+  }
+
+  return '';
+}
+
+function collectSlackUrlCandidates(value, candidates) {
+  if (value === null || value === undefined) return;
+
+  if (typeof value === 'string') {
+    candidates.push(value);
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(function(item) {
+      collectSlackUrlCandidates(item, candidates);
+    });
+    return;
+  }
+
+  if (typeof value !== 'object') return;
+
+  ['url', 'original_url', 'from_url', 'title_link', 'text', 'fallback'].forEach(function(key) {
+    if (value[key]) {
+      collectSlackUrlCandidates(value[key], candidates);
+    }
+  });
+
+  ['blocks', 'elements', 'attachments', 'fields', 'accessory'].forEach(function(key) {
+    if (value[key]) {
+      collectSlackUrlCandidates(value[key], candidates);
+    }
+  });
 }
 
 function extractFirstUrl(text) {
