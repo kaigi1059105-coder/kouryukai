@@ -50,7 +50,7 @@ GASの「プロジェクトの設定」→「スクリプト プロパティ」�
 | `AI_PROVIDER` | `gemini` |
 | `GEMINI_API_KEY` | Google AI Studioで作成したAPIキー |
 | `GEMINI_MODEL` | 省略可。既定は`gemini-3.1-flash-lite` |
-| `SLACK_MENTION_MAP` | 任意。担当者名をSlackメンションに変換するJSON |
+| `SLACK_MENTION_MAP` | 任意。担当者名をSlackメンションに固定変換するJSON |
 
 Claudeを使う場合だけ、`AI_PROVIDER=claude`、`CLAUDE_API_KEY`、必要なら`CLAUDE_MODEL`を設定します。
 
@@ -60,7 +60,7 @@ Claudeを使う場合だけ、`AI_PROVIDER=claude`、`CLAUDE_API_KEY`、必要�
 {"千石":"<@UXXXXXXXX>","長島":"<@UYYYYYYYY>"}
 ```
 
-担当者欄に`千石/長島`と入れると、通知ではSlackメンションになります。未設定の名前は`千石さん`のような通常テキストになります。
+担当者欄に`千石/長島`と入れると、通知先チャンネル内のメンバーから苗字が一致する人を探してSlackメンションします。見つからない場合は`SLACK_MENTION_MAP`を使います。どちらも見つからない場合は`千石さん`のような通常テキストになります。
 
 SlackユーザーIDは、Slackで対象メンバーのプロフィールを開き、「その他」→「メンバーIDをコピー」で取得します。
 
@@ -84,8 +84,11 @@ SlackユーザーIDは、Slackで対象メンバーのプロフィールを開�
 - `channels:read`
 - `groups:history`
 - `groups:read`
+- `users:read`
 
 公開チャンネルだけなら`channels:*`で足りますが、今回の`bot-test`はプライベートとのことなので`groups:*`も入れるのが安全です。
+
+`users:read`は、担当者名からSlackメンション対象を探すために必要です。追加後はSlack Appを再インストールしてください。
 
 ### Event Subscriptions
 

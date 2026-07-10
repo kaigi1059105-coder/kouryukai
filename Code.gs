@@ -862,21 +862,8 @@ function sortAndGroupRows(sheet) {
 }
 
 function getDateSortKey(dateValue, monthValue) {
-  if (Object.prototype.toString.call(dateValue) === '[object Date]' && !isNaN(dateValue.getTime())) {
-    return dateValue.getTime();
-  }
-
-  const text = String(dateValue || '');
-  const match = text.match(/(\d{4})\D+(\d{1,2})\D+(\d{1,2})/);
-  if (match) {
-    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3])).getTime();
-  }
-
-  const monthMatch = String(monthValue || text).match(/(\d{1,2})月/);
-  if (monthMatch) {
-    return new Date(2099, Number(monthMatch[1]) - 1, 1).getTime();
-  }
-
+  const eventDate = getEventDateObject(dateValue, monthValue);
+  if (eventDate) return eventDate.getTime();
   return new Date(2999, 0, 1).getTime();
 }
 
@@ -961,13 +948,15 @@ function isReadyToNotify(status, assignee, targetLead, targetAppointment, sendFl
     String(sendFlag || '').trim() === '送る';
 }
 
-function formatAssigneeNames(assignee, mentionMap) {
+function formatAssigneeNames(assignee, mentionMap, config) {
   return String(assignee || '')
     .split(/[\/／、,，\s]+/)
     .map(function(name) {
       const trimmed = name.trim();
       if (!trimmed) return '';
       if (mentionMap && mentionMap[trimmed]) return mentionMap[trimmed];
+      const channelMention = findSlackMentionByName(trimmed, config);
+      if (channelMention) return channelMention;
       return /さん$|様$/.test(trimmed) ? trimmed : trimmed + 'さん';
     })
     .filter(function(name) {
@@ -976,9 +965,130 @@ function formatAssigneeNames(assignee, mentionMap) {
     .join('、');
 }
 
+function findSlackMentionByName(name, config) {
+  const normalizedName = normalizePersonName(name);
+  if (!normalizedName) return '';
+
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'slack_mention_' + config.slackNotifyChannel + '_' + normalizedName;
+  const cachedMention = cache.get(cacheKey);
+  if (cachedMention) return cachedMention;
+
+  const members = fetchSlackChannelMemberIds(config);
+  for (let i = 0; i < members.length; i++) {
+    const user = fetchSlackUserInfo(config, members[i]);
+    if (!user || user.deleted || user.is_bot) continue;
+
+    const names = [
+      user.name,
+      user.real_name,
+      user.profile && user.profile.real_name,
+      user.profile && user.profile.display_name,
+      user.profile && user.profile.real_name_normalized,
+      user.profile && user.profile.display_name_normalized,
+    ].filter(function(value) {
+      return String(value || '').trim() !== '';
+    });
+
+    if (names.some(function(candidate) {
+      return normalizePersonName(candidate).indexOf(normalizedName) !== -1;
+    })) {
+      const mention = '<@' + user.id + '>';
+      cache.put(cacheKey, mention, 21600);
+      return mention;
+    }
+  }
+
+  cache.put(cacheKey, '', 300);
+  return '';
+}
+
+function normalizePersonName(value) {
+  return String(value || '')
+    .replace(/[さん様君くん氏\s　]/g, '')
+    .toLowerCase();
+}
+
+function fetchSlackChannelMemberIds(config) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'slack_channel_members_' + config.slackNotifyChannel;
+  const cachedMembers = cache.get(cacheKey);
+  if (cachedMembers) {
+    try {
+      return JSON.parse(cachedMembers);
+    } catch (err) {
+      console.error('Slack member cache parse error:', err);
+    }
+  }
+
+  let cursor = '';
+  let members = [];
+  do {
+    const endpoint = 'https://slack.com/api/conversations.members?channel=' +
+      encodeURIComponent(config.slackNotifyChannel) +
+      '&limit=200' +
+      (cursor ? '&cursor=' + encodeURIComponent(cursor) : '');
+    const result = callSlackApiGet(config, endpoint);
+    if (!result.ok) {
+      console.error('Slack conversations.members error:', JSON.stringify(result));
+      return [];
+    }
+
+    members = members.concat(result.members || []);
+    cursor = result.response_metadata && result.response_metadata.next_cursor ?
+      result.response_metadata.next_cursor : '';
+  } while (cursor);
+
+  cache.put(cacheKey, JSON.stringify(members), 1800);
+  return members;
+}
+
+function fetchSlackUserInfo(config, userId) {
+  const cache = CacheService.getScriptCache();
+  const cacheKey = 'slack_user_' + userId;
+  const cachedUser = cache.get(cacheKey);
+  if (cachedUser) {
+    try {
+      return JSON.parse(cachedUser);
+    } catch (err) {
+      console.error('Slack user cache parse error:', err);
+    }
+  }
+
+  const endpoint = 'https://slack.com/api/users.info?user=' + encodeURIComponent(userId);
+  const result = callSlackApiGet(config, endpoint);
+  if (!result.ok) {
+    console.error('Slack users.info error:', JSON.stringify(result));
+    return null;
+  }
+
+  cache.put(cacheKey, JSON.stringify(result.user), 21600);
+  return result.user;
+}
+
+function callSlackApiGet(config, endpoint) {
+  const response = UrlFetchApp.fetch(endpoint, {
+    method: 'get',
+    headers: {
+      'Authorization': 'Bearer ' + config.slackBotToken,
+    },
+    muteHttpExceptions: true,
+  });
+
+  try {
+    return JSON.parse(response.getContentText());
+  } catch (err) {
+    return {
+      ok: false,
+      error: 'invalid_json',
+      body: response.getContentText(),
+    };
+  }
+}
+
 function postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment) {
   const config = getConfig();
-  const assigneeText = formatAssigneeNames(assignee, config.slackMentionMap);
+  const assigneeText = formatAssigneeNames(assignee, config.slackMentionMap, config);
 
   const messageText =
     date + '頃に' + assigneeText + '参加確定です！！\n\n' +
@@ -1061,6 +1171,11 @@ function getEventDateObject(dateValue, monthValue) {
     return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
   }
 
+  match = text.match(/(\d{1,2})\s*[\/／]\s*(\d{1,2})/);
+  if (match) {
+    return new Date(new Date().getFullYear(), Number(match[1]) - 1, Number(match[2]));
+  }
+
   match = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
   if (match) {
     const year = new Date().getFullYear();
@@ -1074,11 +1189,16 @@ function getEventDateObject(dateValue, monthValue) {
     return new Date(year, Number(monthMatch[1]) - 1, Number(dayMatch[1]));
   }
 
+  if (monthMatch) {
+    const year = new Date().getFullYear();
+    return new Date(year, Number(monthMatch[1]) - 1, 1);
+  }
+
   return null;
 }
 
 function postSlackReminderMessage(config, eventInfo) {
-  const assigneeText = formatAssigneeNames(eventInfo.assignee, config.slackMentionMap);
+  const assigneeText = formatAssigneeNames(eventInfo.assignee, config.slackMentionMap, config);
   const messageText =
     '【本日参加リマインド】\n' +
     eventInfo.date + 'に' + assigneeText + '参加予定です！！\n\n' +
