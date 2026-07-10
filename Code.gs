@@ -83,6 +83,7 @@ function doPost(e) {
     if (url) {
       enqueueEventUrl({
         url: url,
+        slackContext: buildSlackEventContext(event),
         eventId: data.event_id || '',
         channel: event.channel,
         ts: event.ts || '',
@@ -132,6 +133,20 @@ function extractFirstUrlFromSlackEvent(event) {
   }
 
   return '';
+}
+
+function buildSlackEventContext(event) {
+  const candidates = [];
+  collectSlackUrlCandidates(event, candidates);
+  return candidates
+    .map(function(value) {
+      return String(value || '').trim();
+    })
+    .filter(function(value) {
+      return value !== '';
+    })
+    .slice(0, 30)
+    .join('\n');
 }
 
 function collectSlackUrlCandidates(value, candidates) {
@@ -284,10 +299,17 @@ function processEventUrl(url, config, slackItem) {
     });
     const html = response.getContentText('UTF-8');
     const pageText = htmlToReadableText(html).substring(0, 20000);
+    const imageUrl = extractPrimaryImageUrl(html, url);
+    const extractionText = [
+      slackItem && slackItem.slackContext ? 'Slack投稿・リンク展開情報:\n' + slackItem.slackContext : '',
+      'ページ本文:\n' + pageText,
+    ].filter(function(value) {
+      return value !== '';
+    }).join('\n\n');
 
     const extracted = mergeWithFallbackEventInfo(
-      extractEventInfo(pageText, url, config),
-      pageText,
+      extractEventInfo(extractionText, url, config, imageUrl),
+      extractionText,
       url
     );
     if (!hasExtractedEventInfo(extracted)) {
@@ -375,17 +397,49 @@ function extractMetadataText(html) {
     .join('\n');
 }
 
-function extractEventInfo(pageText, url, config) {
+function extractPrimaryImageUrl(html, pageUrl) {
+  const source = String(html || '');
+  const patterns = [
+    /<meta\s+[^>]*property=["']og:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
+    /<meta\s+[^>]*name=["']twitter:image["'][^>]*content=["']([^"']+)["'][^>]*>/i,
+    /<img\s+[^>]*(?:class|alt|title)=["'][^"']*(?:main|hero|event|交流会|セミナー)[^"']*["'][^>]*src=["']([^"']+)["'][^>]*>/i,
+    /<img\s+[^>]*src=["']([^"']+)["'][^>]*>/i,
+  ];
+
+  for (let i = 0; i < patterns.length; i++) {
+    const match = source.match(patterns[i]);
+    if (match && match[1]) return resolveUrl(match[1], pageUrl);
+  }
+
+  return '';
+}
+
+function resolveUrl(rawUrl, baseUrl) {
+  const value = String(rawUrl || '').trim();
+  if (!value) return '';
+  if (value.match(/^https?:\/\//i)) return value;
+  if (value.indexOf('//') === 0) return 'https:' + value;
+
+  const baseMatch = String(baseUrl || '').match(/^(https?:\/\/[^\/]+)(\/.*)?$/i);
+  if (!baseMatch) return value;
+  if (value.charAt(0) === '/') return baseMatch[1] + value;
+
+  const basePath = (baseMatch[2] || '/').replace(/\/[^\/]*$/, '/');
+  return baseMatch[1] + basePath + value;
+}
+
+function extractEventInfo(pageText, url, config, imageUrl) {
   if (config.aiProvider === 'claude') {
     return extractEventInfoWithClaude(pageText, url, config);
   }
-  return extractEventInfoWithGemini(pageText, url, config);
+  return extractEventInfoWithGemini(pageText, url, config, imageUrl);
 }
 
-function buildExtractionPrompt(pageText, url) {
+function buildExtractionPrompt(pageText, url, hasImage) {
   return `
 以下は交流会・イベントページから抽出した本文です。
 URL: ${url}
+${hasImage ? '添付画像にも日時・場所・交流会名・料金が書かれている可能性があります。画像内の文字も読んでください。' : ''}
 
 この本文から交流会情報をJSON形式で抽出してください。
 情報が見つからない項目は空文字("")にしてください。
@@ -404,7 +458,7 @@ ${pageText}
 `;
 }
 
-function extractEventInfoWithGemini(pageText, url, config) {
+function extractEventInfoWithGemini(pageText, url, config, imageUrl) {
   if (!config.geminiApiKey) {
     throw new Error('GEMINI_API_KEY is not set.');
   }
@@ -412,6 +466,10 @@ function extractEventInfoWithGemini(pageText, url, config) {
   const endpoint = 'https://generativelanguage.googleapis.com/v1beta/models/' +
     encodeURIComponent(config.geminiModel) + ':generateContent?key=' +
     encodeURIComponent(config.geminiApiKey);
+
+  const parts = [{ text: buildExtractionPrompt(pageText, url, Boolean(imageUrl)) }];
+  const imagePart = fetchGeminiImagePart(imageUrl);
+  if (imagePart) parts.push(imagePart);
 
   const response = UrlFetchApp.fetch(endpoint, {
     method: 'post',
@@ -421,7 +479,7 @@ function extractEventInfoWithGemini(pageText, url, config) {
     payload: JSON.stringify({
       contents: [{
         role: 'user',
-        parts: [{ text: buildExtractionPrompt(pageText, url) }],
+        parts: parts,
       }],
       generationConfig: {
         temperature: 0,
@@ -445,6 +503,36 @@ function extractEventInfoWithGemini(pageText, url, config) {
   return parseJsonObject(text || '');
 }
 
+function fetchGeminiImagePart(imageUrl) {
+  if (!imageUrl) return null;
+
+  try {
+    const response = UrlFetchApp.fetch(imageUrl, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (compatible; KouryukaiBot/1.0)',
+      },
+    });
+    const statusCode = response.getResponseCode();
+    if (statusCode < 200 || statusCode >= 300) return null;
+
+    const blob = response.getBlob();
+    const contentType = blob.getContentType() || 'image/png';
+    if (!contentType.match(/^image\//)) return null;
+
+    return {
+      inlineData: {
+        mimeType: contentType,
+        data: Utilities.base64Encode(blob.getBytes()),
+      },
+    };
+  } catch (err) {
+    console.error('Image fetch error:', err);
+    return null;
+  }
+}
+
 function extractEventInfoWithClaude(pageText, url, config) {
   if (!config.claudeApiKey) {
     throw new Error('CLAUDE_API_KEY is not set.');
@@ -460,7 +548,7 @@ function extractEventInfoWithClaude(pageText, url, config) {
     payload: JSON.stringify({
       model: config.claudeModel,
       max_tokens: 512,
-      messages: [{ role: 'user', content: buildExtractionPrompt(pageText, url) }],
+      messages: [{ role: 'user', content: buildExtractionPrompt(pageText, url, false) }],
     }),
     muteHttpExceptions: true,
   });
