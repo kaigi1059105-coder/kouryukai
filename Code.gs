@@ -923,6 +923,39 @@ function onEdit(e) {
   sortAndGroupRows(sheet);
 }
 
+function sendPendingNotifications() {
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.spreadsheetId).getSheets()[0];
+  ensureSheetHeaders(sheet);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  for (let row = 2; row <= lastRow; row++) {
+    if (isBlankDataRow(sheet, row)) continue;
+
+    const status = sheet.getRange(row, 8).getValue();
+    const assignee = sheet.getRange(row, 9).getValue();
+    const targetLead = sheet.getRange(row, 10).getValue();
+    const targetAppointment = sheet.getRange(row, 11).getValue();
+    const sendFlag = sheet.getRange(row, 12).getValue();
+    const notified = sheet.getRange(row, 13).getValue();
+
+    if (notified === '通知済み') continue;
+    if (!isReadyToNotify(status, assignee, targetLead, targetAppointment, sendFlag)) continue;
+
+    const eventName = sheet.getRange(row, 4).getValue();
+    const date = sheet.getRange(row, 2).getValue();
+    const location = sheet.getRange(row, 3).getValue();
+    const url = sheet.getRange(row, 5).getValue();
+
+    postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment);
+    sheet.getRange(row, 13).setValue('通知済み');
+  }
+
+  sortAndGroupRows(sheet);
+}
+
 function isBlankDataRow(sheet, row) {
   const values = sheet.getRange(row, 1, 1, COLUMN_COUNT).getValues()[0];
   return values.every(function(value) {
