@@ -9,7 +9,7 @@ const QUEUE_PROPERTY_KEY = 'PENDING_EVENT_URLS';
 const DEFAULT_AI_PROVIDER = 'gemini';
 const DEFAULT_GEMINI_MODEL = 'gemini-3.1-flash-lite';
 const DEFAULT_CLAUDE_MODEL = 'claude-sonnet-4-20250514';
-const COLUMN_COUNT = 13;
+const COLUMN_COUNT = 14;
 const HEADERS = [
   '月',
   '日時',
@@ -24,6 +24,7 @@ const HEADERS = [
   '目標アポ',
   '通知を送る',
   '通知済み',
+  'リマインド済み',
 ];
 
 function getConfig() {
@@ -700,12 +701,14 @@ function addRowToSpreadsheet(info, url, spreadsheetId) {
     '',
     '',
     '',
+    '',
   ]);
   sortAndGroupRows(sheet);
 }
 
 function ensureSheetHeaders(sheet) {
   migrateOldColumnLayout(sheet);
+  migrateReminderColumnLayout(sheet);
 
   const existingHeaders = sheet.getRange(1, 1, 1, COLUMN_COUNT).getValues()[0];
   const needsUpdate = HEADERS.some(function(header, index) {
@@ -745,7 +748,23 @@ function migrateOldColumnLayout(sheet) {
       row[11],
       '',
       row[9],
+      '',
     ];
+  });
+
+  sheet.getRange(1, 1, lastRow, COLUMN_COUNT).setValues(newRows);
+}
+
+function migrateReminderColumnLayout(sheet) {
+  const oldHeaders = sheet.getRange(1, 1, 1, 13).getValues()[0];
+  const needsReminderColumn = oldHeaders[12] === '通知済み';
+  if (!needsReminderColumn) return;
+
+  const lastRow = Math.max(sheet.getLastRow(), 1);
+  const oldRows = sheet.getRange(1, 1, lastRow, 13).getValues();
+  const newRows = oldRows.map(function(row, index) {
+    if (index === 0) return HEADERS.slice();
+    return row.concat(['']);
   });
 
   sheet.getRange(1, 1, lastRow, COLUMN_COUNT).setValues(newRows);
@@ -768,6 +787,7 @@ function applySheetStyleAndValidation(sheet) {
   sheet.getRange(2, 10, maxRows, 2).setBackground('#f3e8ff');
   sheet.getRange(2, 12, maxRows, 1).setBackground('#ffecec');
   sheet.getRange(2, 13, maxRows, 1).setBackground('#eeeeee');
+  sheet.getRange(2, 14, maxRows, 1).setBackground('#eeeeee');
 
   const monthRule = SpreadsheetApp.newDataValidation()
     .requireValueInList(['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'], true)
@@ -986,4 +1006,118 @@ function postSlackMessage(eventName, date, location, assignee, url, targetLead, 
   if (!result.ok) {
     throw new Error('Slack API error: ' + response.getContentText());
   }
+}
+
+function sendTodayEventReminders() {
+  const config = getConfig();
+  const sheet = SpreadsheetApp.openById(config.spreadsheetId).getSheets()[0];
+  ensureSheetHeaders(sheet);
+
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const todayKey = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+  const rows = sheet.getRange(2, 1, lastRow - 1, COLUMN_COUNT).getValues();
+
+  rows.forEach(function(row, index) {
+    if (row.every(function(value) { return String(value || '').trim() === ''; })) return;
+
+    const status = row[7];
+    const assignee = row[8];
+    const reminderSent = row[13];
+    if (!isConfirmedStatus(status)) return;
+    if (String(assignee || '').trim() === '') return;
+    if (String(reminderSent || '').trim() === todayKey) return;
+
+    const eventDate = getEventDateObject(row[1], row[0]);
+    if (!eventDate) return;
+
+    const eventDateKey = Utilities.formatDate(eventDate, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    if (eventDateKey !== todayKey) return;
+
+    postSlackReminderMessage(config, {
+      month: row[0],
+      date: row[1],
+      location: row[2],
+      eventName: row[3],
+      url: row[4],
+      assignee: assignee,
+      targetLead: row[9],
+      targetAppointment: row[10],
+    });
+
+    sheet.getRange(index + 2, 14).setValue(todayKey);
+  });
+}
+
+function getEventDateObject(dateValue, monthValue) {
+  if (Object.prototype.toString.call(dateValue) === '[object Date]' && !isNaN(dateValue.getTime())) {
+    return dateValue;
+  }
+
+  const text = String(dateValue || '');
+  let match = text.match(/(20\d{2})\D+(\d{1,2})\D+(\d{1,2})/);
+  if (match) {
+    return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  }
+
+  match = text.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+  if (match) {
+    const year = new Date().getFullYear();
+    return new Date(year, Number(match[1]) - 1, Number(match[2]));
+  }
+
+  const monthMatch = String(monthValue || '').match(/(\d{1,2})月/);
+  const dayMatch = text.match(/(\d{1,2})\s*日/);
+  if (monthMatch && dayMatch) {
+    const year = new Date().getFullYear();
+    return new Date(year, Number(monthMatch[1]) - 1, Number(dayMatch[1]));
+  }
+
+  return null;
+}
+
+function postSlackReminderMessage(config, eventInfo) {
+  const assigneeText = formatAssigneeNames(eventInfo.assignee, config.slackMentionMap);
+  const messageText =
+    '【本日参加リマインド】\n' +
+    eventInfo.date + 'に' + assigneeText + '参加予定です！！\n\n' +
+    '目標リード：' + (eventInfo.targetLead || '') + '件　目標アポ数：' + (eventInfo.targetAppointment || '') + '件\n' +
+    '交流会参加後はこのスレッドに報告よろしくお願いいたします\n\n' +
+    '交流会：' + eventInfo.eventName + '\n' +
+    '場所：' + eventInfo.location + '\n' +
+    'URL：' + eventInfo.url;
+
+  const response = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+    method: 'post',
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + config.slackBotToken,
+    },
+    payload: JSON.stringify({
+      channel: config.slackNotifyChannel,
+      text: messageText,
+      unfurl_links: false,
+    }),
+    muteHttpExceptions: true,
+  });
+
+  const result = JSON.parse(response.getContentText());
+  if (!result.ok) {
+    throw new Error('Slack reminder API error: ' + response.getContentText());
+  }
+}
+
+function setupDailyReminderTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function(trigger) {
+    if (trigger.getHandlerFunction() === 'sendTodayEventReminders') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+
+  ScriptApp.newTrigger('sendTodayEventReminders')
+    .timeBased()
+    .everyDays(1)
+    .atHour(9)
+    .create();
 }
