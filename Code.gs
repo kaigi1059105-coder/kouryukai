@@ -211,7 +211,7 @@ function processQueuedEventUrls() {
 
   const config = getConfig();
   queue.forEach(function(item) {
-    processEventUrl(item.url, config);
+    processEventUrl(item.url, config, item);
   });
 }
 
@@ -226,9 +226,12 @@ function removeCurrentQueueTriggers() {
 // ============================================================
 // URL取得、AI抽出、スプレッドシート登録
 // ============================================================
-function processEventUrl(url, config) {
+function processEventUrl(url, config, slackItem) {
   try {
-    if (isUrlAlreadyRegistered(url, config.spreadsheetId)) return;
+    if (isUrlAlreadyRegistered(url, config.spreadsheetId)) {
+      postSlackThreadReply(config, slackItem, 'このURLはすでにスプシに登録済みです。');
+      return;
+    }
 
     const response = UrlFetchApp.fetch(url, {
       muteHttpExceptions: true,
@@ -247,13 +250,35 @@ function processEventUrl(url, config) {
     );
     if (!hasExtractedEventInfo(extracted)) {
       console.error('No event info extracted for URL:', url);
+      postSlackThreadReply(config, slackItem, 'ページは開けましたが、日時と交流会名を自動で取れませんでした。手入力してください。');
       return;
     }
 
     addRowToSpreadsheet(extracted, url, config.spreadsheetId);
+    postSlackThreadReply(config, slackItem, 'スプシに追加しました。');
   } catch (err) {
     console.error('processEventUrl error:', err);
+    postSlackThreadReply(config, slackItem, '登録中にエラーが出ました。GASの実行数を確認してください。');
   }
+}
+
+function postSlackThreadReply(config, slackItem, text) {
+  if (!slackItem || !slackItem.channel || !slackItem.ts) return;
+
+  UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+    method: 'post',
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + config.slackBotToken,
+    },
+    payload: JSON.stringify({
+      channel: slackItem.channel,
+      thread_ts: slackItem.ts,
+      text: text,
+      unfurl_links: false,
+    }),
+    muteHttpExceptions: true,
+  });
 }
 
 function htmlToReadableText(html) {
@@ -510,10 +535,20 @@ function isUrlAlreadyRegistered(url, spreadsheetId) {
   const lastRow = sheet.getLastRow();
   if (lastRow < 2) return false;
 
+  const targetUrl = canonicalizeUrlForCompare(url);
   const existingUrls = sheet.getRange(2, 5, lastRow - 1, 1).getValues();
   return existingUrls.some(function(row) {
-    return row[0] === url;
+    return canonicalizeUrlForCompare(row[0]) === targetUrl;
   });
+}
+
+function canonicalizeUrlForCompare(url) {
+  return String(url || '')
+    .trim()
+    .replace(/^https?:\/\//i, '')
+    .replace(/^www\./i, '')
+    .replace(/\/+$/, '')
+    .toLowerCase();
 }
 
 function addRowToSpreadsheet(info, url, spreadsheetId) {
