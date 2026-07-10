@@ -955,7 +955,12 @@ function formatAssigneeNames(assignee, mentionMap, config) {
       const trimmed = name.trim();
       if (!trimmed) return '';
       if (mentionMap && mentionMap[trimmed]) return mentionMap[trimmed];
-      const channelMention = findSlackMentionByName(trimmed, config);
+      let channelMention = '';
+      try {
+        channelMention = findSlackMentionByName(trimmed, config);
+      } catch (err) {
+        console.error('Slack mention lookup error:', err);
+      }
       if (channelMention) return channelMention;
       return /さん$|様$/.test(trimmed) ? trimmed : trimmed + 'さん';
     })
