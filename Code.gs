@@ -1382,6 +1382,6 @@ function setupDailyReminderTrigger() {
   ScriptApp.newTrigger('sendTodayEventReminders')
     .timeBased()
     .everyDays(1)
-    .atHour(9)
+    .atHour(7)
     .create();
 }
