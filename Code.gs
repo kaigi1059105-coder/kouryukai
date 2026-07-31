@@ -1037,7 +1037,6 @@ function findSlackMentionByName(name, config) {
     }
   }
 
-  cache.put(cacheKey, '', 300);
   return '';
 }
 
@@ -1127,27 +1126,20 @@ function callSlackApiGet(config, endpoint) {
 function testSlackMentionLookup() {
   const config = getConfig();
   const testName = '千石';
-  let mention = '';
-  let errorMessage = '';
-
-  try {
-    mention = findSlackMentionByName(testName, config);
-  } catch (err) {
-    errorMessage = String(err && err.message ? err.message : err);
-  }
+  const detail = diagnoseSlackMentionLookup(testName, config);
 
   let text = '';
-  if (mention) {
-    text = mention + ' メンションテストです。これが青くなれば成功です。';
+  if (detail.mention) {
+    text = detail.mention + ' メンションテストです。これが青くなれば成功です。';
   } else {
     text =
       'メンション検索に失敗しました。\n' +
+      detail.message + '\n\n' +
       '確認するもの：\n' +
       '1. Slack AppのBot Token Scopesに users:read が入っている\n' +
       '2. OAuth & Permissionsで Reinstall to Workspace を押している\n' +
       '3. GASの SLACK_BOT_TOKEN が再インストール後の最新 xoxb- になっている\n' +
-      '4. SLACK_NOTIFY_CHANNEL が通知先チャンネルIDになっている\n' +
-      (errorMessage ? '\nエラー：' + errorMessage : '');
+      '4. SLACK_NOTIFY_CHANNEL が通知先チャンネルIDになっている';
   }
 
   const response = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
@@ -1168,6 +1160,74 @@ function testSlackMentionLookup() {
   if (!result.ok) {
     throw new Error('Slack API error: ' + response.getContentText());
   }
+}
+
+function diagnoseSlackMentionLookup(name, config) {
+  const normalizedName = normalizePersonName(name);
+  const membersResult = callSlackApiGet(config, 'https://slack.com/api/conversations.members?channel=' +
+    encodeURIComponent(config.slackNotifyChannel) + '&limit=200');
+
+  if (!membersResult.ok) {
+    return {
+      mention: '',
+      message: 'conversations.members が失敗しました。\nSlackエラー：' + JSON.stringify(membersResult),
+    };
+  }
+
+  const members = membersResult.members || [];
+  if (members.length === 0) {
+    return {
+      mention: '',
+      message: '通知先チャンネルのメンバーを取得できましたが、人数が0人でした。SLACK_NOTIFY_CHANNELを確認してください。',
+    };
+  }
+
+  let firstUserError = '';
+  let checkedNames = [];
+  for (let i = 0; i < members.length; i++) {
+    const userResult = callSlackApiGet(config, 'https://slack.com/api/users.info?user=' + encodeURIComponent(members[i]));
+    if (!userResult.ok) {
+      if (!firstUserError) firstUserError = JSON.stringify(userResult);
+      continue;
+    }
+
+    const user = userResult.user;
+    if (!user || user.deleted || user.is_bot) continue;
+
+    const names = [
+      user.name,
+      user.real_name,
+      user.profile && user.profile.real_name,
+      user.profile && user.profile.display_name,
+      user.profile && user.profile.real_name_normalized,
+      user.profile && user.profile.display_name_normalized,
+    ].filter(function(value) {
+      return String(value || '').trim() !== '';
+    });
+
+    checkedNames = checkedNames.concat(names);
+    if (names.some(function(candidate) {
+      return normalizePersonName(candidate).indexOf(normalizedName) !== -1;
+    })) {
+      return {
+        mention: '<@' + user.id + '>',
+        message: '',
+      };
+    }
+  }
+
+  if (firstUserError) {
+    return {
+      mention: '',
+      message: 'users.info が失敗しました。\nSlackエラー：' + firstUserError,
+    };
+  }
+
+  const sampleNames = checkedNames.slice(0, 12).join(' / ');
+  return {
+    mention: '',
+    message: 'チャンネルメンバーは読めましたが「' + name + '」に一致する表示名がありませんでした。\n読めた名前例：' + sampleNames,
+  };
 }
 
 function postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment) {
