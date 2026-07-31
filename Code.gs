@@ -1124,6 +1124,52 @@ function callSlackApiGet(config, endpoint) {
   }
 }
 
+function testSlackMentionLookup() {
+  const config = getConfig();
+  const testName = '千石';
+  let mention = '';
+  let errorMessage = '';
+
+  try {
+    mention = findSlackMentionByName(testName, config);
+  } catch (err) {
+    errorMessage = String(err && err.message ? err.message : err);
+  }
+
+  let text = '';
+  if (mention) {
+    text = mention + ' メンションテストです。これが青くなれば成功です。';
+  } else {
+    text =
+      'メンション検索に失敗しました。\n' +
+      '確認するもの：\n' +
+      '1. Slack AppのBot Token Scopesに users:read が入っている\n' +
+      '2. OAuth & Permissionsで Reinstall to Workspace を押している\n' +
+      '3. GASの SLACK_BOT_TOKEN が再インストール後の最新 xoxb- になっている\n' +
+      '4. SLACK_NOTIFY_CHANNEL が通知先チャンネルIDになっている\n' +
+      (errorMessage ? '\nエラー：' + errorMessage : '');
+  }
+
+  const response = UrlFetchApp.fetch('https://slack.com/api/chat.postMessage', {
+    method: 'post',
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + config.slackBotToken,
+    },
+    payload: JSON.stringify({
+      channel: config.slackNotifyChannel,
+      text: text,
+      unfurl_links: false,
+    }),
+    muteHttpExceptions: true,
+  });
+
+  const result = JSON.parse(response.getContentText());
+  if (!result.ok) {
+    throw new Error('Slack API error: ' + response.getContentText());
+  }
+}
+
 function postSlackMessage(eventName, date, location, assignee, url, targetLead, targetAppointment) {
   const config = getConfig();
   const assigneeText = formatAssigneeNames(assignee, config.slackMentionMap, config);
